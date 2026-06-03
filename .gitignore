@@ -10,3 +10,4 @@ tree_images
 
 revision.rst
 
+__pycache__/

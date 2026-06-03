@@ -31,7 +31,7 @@ PY := $(CHAPTERS:.rst=.py)
 BIBTEX_FILE = ../refs.bib
 
 PYTHON = python
-PDFLATEX = TEXINPUTS=".:..:ucs:" pdflatex -halt-on-error
+PDFLATEX = TEXINPUTS=".:..:" xelatex -halt-on-error
 EXAMPLES = ../examples.py
 LATEXHACKS = ../latexhacks.py
 DOCTEST_SPLIT = ../doctest_split.py 
@@ -62,7 +62,7 @@ RSTHACKS = $(PYTHON) ../rsthacks.py
 
 .SUFFIXES: .rst .rst2 .html .pdf .errs .py
 
-html: $(HTML) bibliography.html 
+html: $(HTML) bibliography.html
 
 help: usage
 usage:
@@ -84,10 +84,24 @@ xmllint:
 	$(XMLLINT) book-flat.xml
 
 examples: $(PY)
+
+RST2SRC := $(CHAPTERS:.rst=.rst2) term_index.rst2
+
+%.rst2: %.rst
+	$(RSTHACKS) --format=latex $<
+
 book: book.pdf book.html
-book.rst: $(CHAPTERS) $(REF)
-book.html: book.rst
-book.tex: book.rst
+
+book.rst: $(CHAPTERS) $(REF) $(RST2SRC)
+
+book.html: book.rst $(REF) revision.rst $(RST2SRC) bibliography.html
+	$(RSTHACKS) --format=html book.rst
+	$(RST2HTML) $(REF) book.rst2 > book.html
+
+book.tex: book.rst $(REF) revision.rst $(RST2SRC)
+	$(RSTHACKS) --format=latex $<
+	$(RST2LATEX) --bibliography $(REF) $*.rst2
+	$(PYTHON) $(LATEXHACKS) $@
 
 errs: $(ERRS)
 	ls -l $(ERRS)
@@ -105,7 +119,7 @@ clean_up:
 %$(REF_EXTENSION): %.rst
 	$(RST2REF) $<
 
-%.html: %.rst $(REF) revision.rst
+%.html: %.rst $(REF) revision.rst bibliography.html
 	$(RSTHACKS) --format=html $<
 	$(RST2HTML) $(REF) $*.rst2
 
@@ -130,13 +144,23 @@ revision.rst: $(CHAPTERS)
 	rm -f $*.bbl
 	@echo "pdflatex $< -> $*.pdf (for bibtex)"
 	@(true | $(PDFLATEX) $< >/dev/null) || \
-	         (cat $*.log && rm -f $*.pdf && false)
-	@echo $(BIBTEX) $*
-	@(true | $(BIBTEX) $* || (rm -f $*.pdf $*.bbl && false))
+		 (cat $*.log && rm -f $*.pdf && false)
+	@if grep -q '^\\citation' $*.aux; then \
+		echo "$(BIBTEX) $*"; \
+	$(BIBTEX) $* || (cat $*.blg && rm -f $*.pdf $*.bbl && false); \
+	else \
+		echo "No citations found; skipping bibtex."; \
+		touch $@; \
+	fi
 
-bibliography.html: $(BIBTEX_FILE) bib_template.html
-	cp bib_template.html $@
-	$(BIB2XHTML) $< $@
+# bibliography.html is generated only if bib2xhtml is available
+bibliography.html:
+	cp bib_template.html bibliography.html
+	if command -v bib2xhtml >/dev/null 2>&1; then \
+	bib2xhtml -s named ../refs.bib bibliography.html; \
+	else \
+	echo "Skipping bibliography.html: bib2xhtml not installed"; \
+	fi
 
 # bibliography.xml: bibliography.html bibliography.xsl
 #	$(XSLT) -in bibliography.html -xsl bibliography.xsl > bibliography.xml

@@ -35,11 +35,19 @@ the following ways:
 # compat hack:
 import operator, numbers, collections
 operator.isNumberType = lambda x:isinstance(x, numbers.Number)
-operator.isSequenceType = lambda x:isinstance(x, collections.Sequence)
+try:
+    from collections.abc import Sequence
+except ImportError:
+    from collections import Sequence
+operator.isSequenceType = lambda x:isinstance(x, Sequence)
 
 import re, os.path, textwrap, sys, pickle
 from optparse import OptionParser
-from tree2image import tree_to_image
+
+try:
+    from tree2image import tree_to_image
+except Exception:
+    tree_to_image = None
 
 import docutils.core, docutils.nodes, docutils.io
 from docutils.writers import Writer
@@ -53,6 +61,25 @@ from doctest import DocTestParser
 import docutils.statemachine
 try: import PIL.Image
 except: pass
+
+import os
+from docutils.parsers.rst.directives.misc import Include
+from docutils.parsers.rst import directives
+
+class DedupInclude(Include):
+    def run(self):
+        path = self.arguments[0].strip()
+        norm = os.path.normpath(path)
+
+        if norm.endswith('definitions.rst'):
+            document = self.state.document
+            if getattr(document, '_seen_definitions_include', False):
+                return []
+            document._seen_definitions_include = True
+
+        return super().run()
+
+directives.register_directive('include', DedupInclude)
 
 LATEX_VALIGN_IS_BROKEN = True
 """Set to true to compensate for a bug in the latex writer.  I've
@@ -90,7 +117,7 @@ BIBLIOGRAPHY_HTML = "bibliography.html"
    hyperrefs from citations)."""
 
 # needs to include "../doc" so it works in /doc_contrib
-LATEX_STYLESHEET_PATH = '../../doc/definitions.sty'
+LATEX_STYLESHEET_PATH = '../definitions.sty'
 """The name of the LaTeX style file used for generating PDF output."""
 
 LOCAL_BIBLIOGRAPHY = False
@@ -218,14 +245,16 @@ def tree_directive(name, arguments, options, content, lineno,
         assert 0, 'bad output format %r' % OUTPUT_FORMAT
     if not os.path.exists(TREE_IMAGE_DIR):
         os.mkdir(TREE_IMAGE_DIR)
+    if tree_to_image is None:
+        warning('Tree rendering unavailable (missing tkinter); using text fallback.')
+        return [example(text, text)]
+
     try:
         filename = os.path.join(TREE_IMAGE_DIR, filename)
         tree_to_image(text, filename, density)
     except Exception as e:
-        raise
         warning('Error parsing tree: %s\n%s\n%s' % (e, text, filename))
         return [example(text, text)]
-
     imagenode = docutils.nodes.image(uri=filename, scale=scale, align=align)
     return [imagenode]
 
@@ -1466,9 +1495,13 @@ class UnindentDoctestVisitor(docutils.nodes.NodeVisitor):
 ######################################################################
 #{ HTML Output
 ######################################################################
-from epydoc.docwriter.html_colorize import PythonSourceColorizer
-import epydoc.docwriter.html_colorize
-epydoc.docwriter.html_colorize .PYSRC_EXPANDTO_JAVASCRIPT = ''
+try:
+    from epydoc.docwriter.html_colorize import PythonSourceColorizer
+    import epydoc.docwriter.html_colorize
+    epydoc.docwriter.html_colorize.PYSRC_EXPANDTO_JAVASCRIPT = ''
+    HAVE_EPYDOC_HTML = True
+except Exception:
+    PythonSourceColorizer = None
 
 class CustomizedHTMLWriter(HTMLWriter):
     settings_defaults = HTMLWriter.settings_defaults.copy()
@@ -1985,11 +2018,11 @@ class CustomizedLaTeXWriter(LaTeXWriter):
         'output_encoding': 'utf-8',
         'output_encoding_error_handler': 'backslashreplace',
         #'use_latex_docinfo': True,
-        'font_encoding': 'C10,T1',
+        'font_encoding': 'T1',
         'stylesheet': LATEX_STYLESHEET_PATH,
         'documentoptions': '11pt,twoside',
         'use_latex_footnotes': True,
-        'use_latex_toc': True,
+        'use_latex_toc': False,
         })
     
     def __init__(self):
@@ -2013,13 +2046,7 @@ class CustomizedLaTeXTranslator(LaTeXTranslator):
 
     def __init__(self, document):
         LaTeXTranslator.__init__(self, document)
-        # This needs to go before the \usepackage{inputenc}:
-        self.head_prefix.insert(1, '\\usepackage[cjkgb,postscript]{ucs}\n')
-        # Make sure we put these *before* the stylesheet include line.
-        self.head_prefix.insert(-2, textwrap.dedent(r"""
-            % Unicode font:
-            \usepackage{ttfucs}
-            \DeclareTruetypeFont{cyberbit}{cyberbit}
+        latex_preamble = textwrap.dedent(r"""
             % Index:
             \usepackage{makeidx}
             \makeindex
@@ -2044,7 +2071,9 @@ class CustomizedLaTeXTranslator(LaTeXTranslator):
             % Python interpreter: Traceback message
             \newcommand{\pysrcexcept}[1]{\textbf{#1}}
             % Python interpreter: Output
-            \newcommand{\pysrcoutput}[1]{#1}\n"""))
+            \newcommand{\pysrcoutput}[1]{#1}
+        """)
+        self.head_prefix.append(latex_preamble)
         # Tabularx conflicts with the avm package:
         self.head_prefix = [l for l in self.head_prefix
                             if ('{tabularx}' not in l and
@@ -2067,7 +2096,6 @@ class CustomizedLaTeXTranslator(LaTeXTranslator):
         text = ''.join(('%s' % c) for c in node)
         text = textwrap.dedent(text)
         text = strip_doctest_directives(text)
-        text = text.decode('latin1')
         colorizer = LaTeXDoctestColorizer(self.encode, wrap=False,
                                           callouts=node['callouts'])
         self.literal = True
@@ -2152,35 +2180,28 @@ class CustomizedLaTeXTranslator(LaTeXTranslator):
             self.body.append('\\textbf{')
         else:
             self.body.append('\\textit{')
-        
+
     def depart_idxterm(self, node):
         self.body.append('}')
-    
+
     def visit_index(self, node):
-        self.body.append('\\addcontentsline{toc}{chapter}{Subject Index}\n')
-        self.body.append('\\printindex\n')
-        raise docutils.nodes.SkipNode() # Content already processed
+        self.body.append(
+            '\\pdfbookmark[1]{Subject Index}{subject-index}\n'
+            '\\printindex\n'
+        )
+        raise docutils.nodes.SkipNode()
 
-    def visit_docinfo(self, node):
-        self.docinfo = []
-        self.docinfo.append('\\begin{tabular}{ll}\n')
+#    def visit_docinfo(self, node):
+#        LaTeXTranslator.visit_docinfo(self, node)
 
-    def depart_docinfo(self, node):
-        self.docinfo.append('\\end{tabular}\n')
-        self.body = self.docinfo + self.body
-        self.docinfo = None
+#    def depart_docinfo(self, node):
+#        LaTeXTranslator.depart_docinfo(self, node)
 
     def visit_table(self, node):
-        # For gloss tables, don't use 'longtable'.
-        if 'gloss' in node['classes'] or 'avm' in node['classes']:
-            self._orig_table_type = self.active_table._latex_type
-            self.active_table._latex_type = 'tabular'
         LaTeXTranslator.visit_table(self, node)
         
     def depart_table(self, node):
         LaTeXTranslator.depart_table(self, node)
-        if 'gloss' in node['classes'] or 'avm' in node['classes']:
-            self.active_table._latex_type = self._orig_table_type
 
     def visit_callout_marker(self, node):
         self.body.append(self.encode(chr(0x2460+node['number']-1)))
@@ -2233,24 +2254,17 @@ class CustomizedLaTeXTranslator(LaTeXTranslator):
     def circledigit(self, n):
         return docutils.nodes.Text(chr(0x2460+n-1))
 
-    # Unfortunately, parbox doesn't interact well with alltt.  As a result,
-    # any doctest or pysrc blocks inside an adominition get wrapped oddly.
-    # To fix this, we replace the default code for visit_admonition, which
-    # uses an fbox & parbox, with code that uses a boxedminipage instead.
     def visit_admonition(self, node, name=''):
-        self.body.append('\n')
-        self.body.append('\\begin{table}[h]\n')
-        self.body.append('\\begin{minipage}[t]{8ex}\\includegraphics{../images/jigsaw.png}\\end{minipage}\n')
-        self.body.append('\\begin{minipage}[t]{\\admonitionwidth}\\begin{sffamily}\\small\\vspace*{-5ex}\n')
-        #self.body.append('\\fbox{\\parbox{\\admonitionwidth}{\n')
+        self.body.append('\n\\noindent\n')
+        self.body.append('\\begin{boxedminipage}{\\admonitionwidth}\n')
+        self.body.append('\\begin{sffamily}\\small\n')
         if name and name.lower() != 'note':
-            self.body.append('\\textbf{\\large '+ self.language.labels[name] + '}\n');
-
+            self.body.append('\\textbf{\\large ' + self.language.labels[name] + '}\\par\n')
 
     def depart_admonition(self, node=None):
-        #self.body.append('}}\n') # end parbox fbox
-        self.body.append('\\end{sffamily}\\end{minipage}\\end{table}\n');
-        
+        self.body.append('\\end{sffamily}\n')
+        self.body.append('\\end{boxedminipage}\n')
+
     #def depart_title(self, node):
     #    LaTeXTranslator.depart_title(self, node)
     #    if self.section_level == 1:
@@ -2275,8 +2289,54 @@ class CustomizedLaTeXTranslator(LaTeXTranslator):
 #{ Source Code Highlighting
 ######################################################################
 
-# [xx] Note: requires the very latest svn version of epydoc!
-from epydoc.markup.doctest import DoctestColorizer
+try:
+    # Legacy dependency; often unavailable or incompatible on Python 3.
+    from epydoc.markup.doctest import DoctestColorizer as _EpydocDoctestColorizer
+    HAVE_EPYDOC_DOCTEST = True
+except Exception:
+    _EpydocDoctestColorizer = object
+    HAVE_EPYDOC_DOCTEST = False
+
+class _FallbackDoctestColorizer(object):
+    """
+    Minimal fallback when epydoc is unavailable.
+    Preserves buildability and basic formatting, but not epydoc's full
+    token-level syntax highlighting.
+    """
+    PREFIX = ''
+    SUFFIX = ''
+
+    def __init__(self, encode_func, wrap=False, callouts=None):
+        self.encode = encode_func
+        self.wrap = wrap
+        self.callouts = callouts or {}
+
+    def _classify_line(self, line):
+        stripped = line.lstrip()
+        if stripped.startswith('>>>'):
+            return 'prompt'
+        elif stripped.startswith('...'):
+            return 'more'
+        else:
+            return 'output'
+
+    def colorize_doctest(self, text):
+        pieces = []
+        for line in text.splitlines(True):
+            pieces.append(self.markup(line, self._classify_line(line)))
+        return self.PREFIX + ''.join(pieces) + self.SUFFIX
+
+    def colorize_codeblock(self, text):
+        pieces = []
+        for line in text.splitlines(True):
+            pieces.append(self.markup(line, 'other'))
+        return self.PREFIX + ''.join(pieces) + self.SUFFIX
+
+    def colorize_inline(self, text):
+        return self.markup(text, 'other')
+
+class DoctestColorizer(_EpydocDoctestColorizer if HAVE_EPYDOC_DOCTEST else _FallbackDoctestColorizer):
+    pass
 
 class HTMLDoctestColorizer(DoctestColorizer):
     PREFIX = '<pre class="doctest">\n'
@@ -2300,6 +2360,19 @@ class HTMLDoctestColorizer(DoctestColorizer):
             return ('<span class="pysrc-%s">%s</span>' %
                     (tag, self.encode(s)))
 
+    if not HAVE_EPYDOC_DOCTEST:
+        def colorize_doctest(self, text):
+            pieces = []
+            for line in text.splitlines(True):
+                stripped = line.lstrip()
+                if stripped.startswith('>>>'):
+                    pieces.append(self.markup(line, 'prompt'))
+                elif stripped.startswith('...'):
+                    pieces.append(self.markup(line, 'more'))
+                else:
+                    pieces.append(self.markup(line, 'output'))
+            return self.PREFIX + ''.join(pieces) + self.SUFFIX
+
 class LaTeXDoctestColorizer(DoctestColorizer):
     PREFIX = '\\begin{alltt}\\setlength{\\parindent}{4ex}\\hspace{\\parindent}\\scriptsize\\textbf{'
     SUFFIX = '}\\end{alltt}\n'
@@ -2320,19 +2393,38 @@ class LaTeXDoctestColorizer(DoctestColorizer):
 
         if tag == 'output':
             s = CALLOUT_RE.sub(self._callout, s)
-            
+
         if self.wrap and '\255' not in s:
             s = re.sub(r'(\W|\w\b)(?=.)', '\\1\255', s)
-            s = self.encode(s).replace('\255', '{\linebreak[0]}')
+            s = self.encode(s).replace('\255', '{\\linebreak[0]}')
         else:
-            if self.wrap: warning('Literal contains char \\255')
+            if self.wrap:
+                warning('Literal contains char \\255')
             s = self.encode(s)
-            
+
         if tag == 'other':
             return s
         else:
             return '\\pysrc%s{%s}' % (tag, s)
 
+    if not HAVE_EPYDOC_DOCTEST:
+        def colorize_doctest(self, text):
+            pieces = []
+            for line in text.splitlines(True):
+                stripped = line.lstrip()
+                if stripped.startswith('>>>'):
+                    pieces.append(self.markup(line, 'prompt'))
+                elif stripped.startswith('...'):
+                    pieces.append(self.markup(line, 'more'))
+                else:
+                    pieces.append(self.markup(line, 'output'))
+            return self.PREFIX + ''.join(pieces) + self.SUFFIX
+
+        def colorize_codeblock(self, text):
+            return self.PREFIX + self.markup(text, 'other') + self.SUFFIX
+
+        def colorize_inline(self, text):
+            return self.markup(text, 'other')
 
 # # Regular expressions for colorize_doctestblock
 # # set of keywords as listed in the Python Language Reference 2.4.1
@@ -2672,9 +2764,10 @@ def main():
     filenames = [f for f in filenames if not f.endswith(REF_EXTENSION)]
 
     CustomizedLaTeXWriter.settings_defaults.update(dict(
-        documentclass = options.documentclass,
+        documentclass=options.documentclass,
         stylesheet=options.latex_stylesheet,
-        use_latex_docinfo = (options.documentclass=='book')))
+        use_latex_docinfo=False))
+
     CustomizedLaTeXWriter.settings_defaults['documentoptions'] += (
         ','+options.papersize)
 
@@ -2686,10 +2779,11 @@ def main():
     if options.bibliography:
         LOCAL_BIBLIOGRAPHY = True
         CustomizedLaTeXTranslator.foot_prefix += [
-            '\\bibliographystyle{apalike}\n',
-            '\\addcontentsline{toc}{chapter}{Bibliography}\n',
-            '\\bibliography{%s}\n' %
-            os.path.splitext(options.bibtex_file)[0]]
+    '\\pdfbookmark[1]{Bibliography}{bibliography}\n',
+    '\\bibliographystyle{apalike}\n',
+#    '\\addcontentsline{toc}{chapter}{Bibliography}\n',
+    '\\bibliography{%s}\n' % os.path.splitext(BIBTEX_FILE)[0]
+]
 
     OUTPUT_FORMAT = options.action
     if options.action == 'html':

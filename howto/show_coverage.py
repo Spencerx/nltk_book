@@ -1,8 +1,12 @@
 
 import sys, os, re
+# Note: nltk.test.coverage and color_coverage are legacy dependencies
+# that may not be available in current environments.
 import nltk.test.coverage as coverage
 import color_coverage
 
+# Note: OUT_DIR must remain a relative path (within CWD) to comply
+# with nltk.pathsec (NLTK >= 3.10). See: https://github.com/nltk/nltk/pull/3522
 OUT_DIR = 'coverage'
 MODULE_RE = re.compile(r'nltk.*')
 
@@ -28,7 +32,9 @@ def report_coverage(module):
     sys.stdout.flush()
     (fname, stmts, excluded, missing, fmt_missing, def_info) = (
         coverage.analysis3(module))
-    out = open(os.path.join(OUT_DIR, module.__name__+'.html'), 'wb')
+    # Open in text mode ('w') for Python 3 compatibility; color_coverage
+    # writes str HTML content.
+    out = open(os.path.join(OUT_DIR, module.__name__+'.html'), 'w', encoding='utf-8')
     color_coverage.colorize_file(fname, module.__name__, out,
                                  fmt_missing, def_info)
     out.close()
@@ -58,17 +64,19 @@ def main(filenames):
         coverage.the_coverage.merge_data(cexecuted)
 
     try: init_out_dir()
-    except Exception, e:
-        print 'Unable to create output directory %r: %s' % (OUT_DIR, e)
+    except Exception as e:
+        print('Unable to create output directory %r: %s' % (OUT_DIR, e))
         return
 
-    out = open('coverage-list.txt', 'wb')
+    # Open in text mode ('w') for Python 3 compatibility; HEAD/FOOT/listing
+    # are str, not bytes.
+    out = open('coverage-list.txt', 'w', encoding='utf-8')
     out.write(HEAD)
 
     # Construct a coverage file for each NLTK module.
-    print '\nGenerating coverage summary files...\n'
-    print '  %-40s %s' % ('Module', 'Coverage')
-    print '  '+'-'*50
+    print('\nGenerating coverage summary files...\n')
+    print('  %-40s %s' % ('Module', 'Coverage'))
+    print('  '+'-'*50)
     for module_name, module in sorted(sys.modules.items()):
         if module is None: continue
         if MODULE_RE.match(module_name):
